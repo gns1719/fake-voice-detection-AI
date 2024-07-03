@@ -12,4 +12,4 @@ train/
 
 unlabeled_data/
 
-.csv
+*.csv
