@@ -12,7 +12,6 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 import torch
-import torchmetrics
 import os
 
 import warnings
