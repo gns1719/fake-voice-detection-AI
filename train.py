@@ -3,13 +3,15 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
-from model import MLP, Config
+from model import CNN
+from preprocess import Config
 import random
 import os
+
+CONFIG = Config()
 
 def seed_everything(seed):
     random.seed(seed)
@@ -30,14 +32,14 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.label is not None:
-            return self.mel[idx], self.label[idx]
-        return self.mel[idx]
+            return torch.FloatTensor(self.mel[idx]).unsqueeze(0), torch.FloatTensor(self.label[idx])
+        return torch.FloatTensor(self.mel[idx]).unsqueeze(0)
 
 def load_data():
-    train_mel = pd.read_csv('train_mel.csv').values
-    train_labels = pd.read_csv('train_labels.csv').values
-    val_mel = pd.read_csv('val_mel.csv').values
-    val_labels = pd.read_csv('val_labels.csv').values
+    train_mel = np.load('train_mel.npy')
+    train_labels = np.load('train_labels.npy')
+    val_mel = np.load('val_mel.npy')
+    val_labels = np.load('val_labels.npy')
     
     train_dataset = CustomDataset(train_mel, train_labels)
     val_dataset = CustomDataset(val_mel, val_labels)
@@ -51,7 +53,7 @@ def multiLabel_AUC(y_true, y_scores):
         auc_scores.append(auc)
     return np.mean(auc_scores)
 
-def train(model, optimizer, train_loader, val_loader, device, n_epochs=5):
+def train(model, optimizer, train_loader, val_loader, device, n_epochs=10):
     criterion = nn.BCELoss().to(device)
     best_val_score = 0
     best_model = None
@@ -72,52 +74,54 @@ def train(model, optimizer, train_loader, val_loader, device, n_epochs=5):
             train_loss.append(loss.item())
         
         val_loss, val_score = validation(model, criterion, val_loader, device)
-        train_loss = np.mean(train_loss)
-        print(f'Epoch [{epoch}], Train Loss: [{train_loss:.5f}] Val Loss: [{val_loss:.5f}] Val AUC: [{val_score:.5f}]')
         
-        if best_val_score < val_score:
+        if val_score > best_val_score:
             best_val_score = val_score
             best_model = model.state_dict()
-    
+        
+        print(f"Epoch {epoch}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}, Val AUC: {val_score:.4f}")
+
     return best_model
 
 def validation(model, criterion, val_loader, device):
     model.eval()
-    val_loss, all_labels, all_probs = [], [], []
+    val_loss = []
+    val_true = []
+    val_pred = []
     
     with torch.no_grad():
         for features, labels in tqdm(val_loader, desc="Validation"):
             features = features.float().to(device)
             labels = labels.float().to(device)
             
-            probs = model(features)
-            loss = criterion(probs, labels)
-            
+            output = model(features)
+            loss = criterion(output, labels)
             val_loss.append(loss.item())
-            all_labels.append(labels.cpu().numpy())
-            all_probs.append(probs.cpu().numpy())
+            
+            val_true.append(labels.cpu().numpy())
+            val_pred.append(output.cpu().numpy())
     
-    val_loss = np.mean(val_loss)
-    all_labels = np.concatenate(all_labels, axis=0)
-    all_probs = np.concatenate(all_probs, axis=0)
-    auc_score = multiLabel_AUC(all_labels, all_probs)
+    val_true = np.concatenate(val_true)
+    val_pred = np.concatenate(val_pred)
     
-    return val_loss, auc_score
+    val_score = multiLabel_AUC(val_true, val_pred)
+    
+    return np.mean(val_loss), val_score
 
 if __name__ == "__main__":
-    CONFIG = Config()
     seed_everything(CONFIG.SEED)
     
-    device = torch.device('cuda')
-    
     train_dataset, val_dataset = load_data()
-    train_loader = DataLoader(train_dataset, batch_size=96, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=96, shuffle=False)
     
-    model = MLP().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    train_loader = DataLoader(train_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False)
     
-    best_model = train(model, optimizer, train_loader, val_loader, device)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model = CNN().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG.LR)
+    
+    best_model = train(model, optimizer, train_loader, val_loader, device, CONFIG.N_EPOCHS)
     
     torch.save(best_model, 'best_model.pth')
-    print("Training completed. Best model saved to 'best_model.pth'")
+    print("Training completed and best model saved.")

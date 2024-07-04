@@ -5,6 +5,7 @@ import torch.nn as nn
 import random
 import os
 import numpy as np
+from preprocess import Config
 
 def seed_everything(seed):
     random.seed(seed)
@@ -15,25 +16,31 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
-class Config:
-    N_MFCC = 13
-    N_CLASSES = 2
-    SEED = 42
-
 CONFIG = Config()
 
-class MLP(nn.Module):
-    def __init__(self, input_dim=128, hidden_dim=128, output_dim=CONFIG.N_CLASSES):
-        super(MLP, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, output_dim)
+class CNN(nn.Module):
+    def __init__(self, input_channels=1, output_dim=CONFIG.N_CLASSES):
+        super(CNN, self).__init__()
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.5)
+
+        # Calculate the size of the flattened features
+        self.flat_features = 128 * (CONFIG.N_MELS // 8) * (CONFIG.MAX_LEN // 8)
+
+        self.fc1 = nn.Linear(self.flat_features, 256)
+        self.fc2 = nn.Linear(256, output_dim)
 
     def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+        x = self.pool(self.relu(self.conv3(x)))
+        x = x.view(x.size(0), -1)
+        x = self.dropout(self.relu(self.fc1(x)))
+        x = self.fc2(x)
         x = torch.sigmoid(x)
         return x
 
@@ -43,5 +50,5 @@ def save_model(model, path='model.pth'):
 
 if __name__ == "__main__":
     seed_everything(CONFIG.SEED)
-    model = MLP()
+    model = CNN()
     save_model(model)

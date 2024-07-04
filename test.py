@@ -5,58 +5,86 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 import librosa
-from model import MLP, seed_everything
+from torch.utils.data import DataLoader
 from preprocess import Config
+from train import CustomDataset
+from model import CNN
+import random
+import os
 
-def get_mel_spectrogram_feature(df):
+CONFIG = Config()
+
+def get_mel_spectrogram_feature(df, train_mode=True):
     features = []
-    for _, row in tqdm(df.iterrows(), desc="Extracting Mel-Spectrogram features"):
-        file_path = f"./test/{row['id']}.ogg"
-        y, sr = librosa.load(file_path, sr=32000)
-        mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=Config.N_MELS, fmax=Config.FMAX)
+    labels = []
+    for _, row in tqdm(df.iterrows()):
+        y, sr = librosa.load(row['path'], sr=CONFIG.SR)
+        
+        mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=CONFIG.N_MELS, fmax=CONFIG.FMAX)
         mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
-        mel_spectrogram_db = np.mean(mel_spectrogram_db.T, axis=0)
+        
+        # Pad or truncate to MAX_LEN
+        if mel_spectrogram_db.shape[1] > CONFIG.MAX_LEN:
+            mel_spectrogram_db = mel_spectrogram_db[:, :CONFIG.MAX_LEN]
+        else:
+            mel_spectrogram_db = np.pad(mel_spectrogram_db, ((0, 0), (0, CONFIG.MAX_LEN - mel_spectrogram_db.shape[1])), mode='constant')
+        
         features.append(mel_spectrogram_db)
-    return features
 
-def load_model(model_path):
-    model = MLP()
-    model.load_state_dict(torch.load(model_path))
+        if train_mode and 'label' in df.columns:
+            label = row['label']
+            label_vector = np.zeros(CONFIG.N_CLASSES, dtype=float)
+            label_vector[0 if label == 'fake' else 1] = 1
+            labels.append(label_vector)
+
+    if train_mode and labels:
+        return np.array(features), np.array(labels)
+    return np.array(features)
+
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True
+
+def load_test_data(test_csv_path):
+    test_df = pd.read_csv(test_csv_path)
+    test_mel = get_mel_spectrogram_feature(test_df, train_mode=False)
+    test_dataset = CustomDataset(test_mel, None)
+    return test_dataset, test_df['id']
+
+def predict(model, test_loader, device):
     model.eval()
-    return model
-
-def predict(model, features, device):
-    model.to(device)
     predictions = []
+    
     with torch.no_grad():
-        for feature in tqdm(features, desc="Making predictions"):
-            feature = torch.FloatTensor(feature).unsqueeze(0).to(device)
-            output = model(feature)
-            predictions.append(output.cpu().numpy().squeeze())
+        for features in test_loader:
+            features = features.float().to(device)
+            output = model(features)
+            predictions.append(output.cpu().numpy())
+    
+    predictions = np.concatenate(predictions)
     return predictions
 
-def main():
-    seed_everything(Config.SEED)
-    device = torch.device('cuda')
-
-    # Load the sample submission file
-    sample_submission = pd.read_csv('sample_submission.csv')
-
-    # Load and preprocess test data
-    test_features = get_mel_spectrogram_feature(sample_submission)
-
-    # Load the trained model
-    model = load_model('best_model.pth')
-
-    # Make predictions
-    predictions = predict(model, test_features, device)
-
-    # Update the sample submission with predictions
-    sample_submission.iloc[:, 1:] = predictions
-
-    # Save the results
-    sample_submission.to_csv('submission.csv', index=False)
-    print("Predictions saved to submission.csv")
-
 if __name__ == "__main__":
-    main()
+    seed_everything(CONFIG.SEED)
+    
+    test_dataset, test_ids = load_test_data('./test.csv')
+    test_loader = DataLoader(test_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model = CNN().to(device)
+    model.load_state_dict(torch.load('best_model.pth'))
+    
+    predictions = predict(model, test_loader, device)
+    
+    submission = pd.DataFrame(predictions, columns=['fake', 'real'])
+    submission['id'] = test_ids
+    submission = submission[['id', 'fake', 'real']]  # Rearrange columns to ['id', 'fake', 'real']
+    
+    submission.to_csv('submission.csv', index=False)
+    print("Predictions saved to submission.csv.")

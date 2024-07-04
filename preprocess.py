@@ -5,33 +5,26 @@ from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
 import random
-
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
-
 import torch
 import os
-
+from tqdm import tqdm
 import warnings
+
 warnings.filterwarnings('ignore')
 
-device = torch.device('cuda')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class Config:
     SR = 32000
     N_MELS = 128
     FMAX = 8000
-    # Dataset
     ROOT_FOLDER = './'
-    # Training
     N_CLASSES = 2
     BATCH_SIZE = 96
     N_EPOCHS = 5
     LR = 3e-4
-    # Others
     SEED = 42
+    MAX_LEN = 1000
 
 CONFIG = Config()
 
@@ -44,7 +37,7 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 
-seed_everything(CONFIG.SEED) # Seed 고정
+seed_everything(CONFIG.SEED)
 
 df = pd.read_csv('./train.csv')
 train, val, _, _ = train_test_split(df, df['label'], test_size=0.2, random_state=CONFIG.SEED)
@@ -57,7 +50,13 @@ def get_mel_spectrogram_feature(df, train_mode=True):
         
         mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=CONFIG.N_MELS, fmax=CONFIG.FMAX)
         mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
-        mel_spectrogram_db = np.mean(mel_spectrogram_db.T, axis=0)
+        
+        # Pad or truncate to MAX_LEN
+        if mel_spectrogram_db.shape[1] > CONFIG.MAX_LEN:
+            mel_spectrogram_db = mel_spectrogram_db[:, :CONFIG.MAX_LEN]
+        else:
+            mel_spectrogram_db = np.pad(mel_spectrogram_db, ((0, 0), (0, CONFIG.MAX_LEN - mel_spectrogram_db.shape[1])), mode='constant')
+        
         features.append(mel_spectrogram_db)
 
         if train_mode:
@@ -67,41 +66,16 @@ def get_mel_spectrogram_feature(df, train_mode=True):
             labels.append(label_vector)
 
     if train_mode:
-        return features, labels
-    return features
+        return np.array(features), np.array(labels)
+    return np.array(features)
 
 train_mel, train_labels = get_mel_spectrogram_feature(train, True)
 val_mel, val_labels = get_mel_spectrogram_feature(val, True)
 
-class CustomDataset(Dataset):
-    def __init__(self, mel, label):
-        self.mel = mel
-        self.label = label
-
-    def __len__(self):
-        return len(self.mel)
-
-    def __getitem__(self, idx):
-        if self.label is not None:
-            return self.mel[idx], self.label[idx]
-        return self.mel[idx]
-    
-train_dataset = CustomDataset(train_mel, train_labels)
-val_dataset = CustomDataset(val_mel, val_labels)
-
-# Save preprocessed data using pandas
+# Save preprocessed data
 print("Saving preprocessed data...")
-
-# Convert to DataFrames
-train_mel_df = pd.DataFrame(train_mel)
-train_labels_df = pd.DataFrame(train_labels)
-val_mel_df = pd.DataFrame(val_mel)
-val_labels_df = pd.DataFrame(val_labels)
-
-# Save to CSV
-train_mel_df.to_csv('train_mel.csv', index=False)
-train_labels_df.to_csv('train_labels.csv', index=False)
-val_mel_df.to_csv('val_mel.csv', index=False)
-val_labels_df.to_csv('val_labels.csv', index=False)
-
+np.save('train_mel.npy', np.array(train_mel))
+np.save('val_mel.npy', np.array(val_mel))
+np.save('train_labels.npy', np.array(train_labels))
+np.save('val_labels.npy', np.array(val_labels))
 print("Preprocessed data saved successfully.")

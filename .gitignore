@@ -13,3 +13,5 @@ train/
 unlabeled_data/
 
 *.csv
+
+*.npy
