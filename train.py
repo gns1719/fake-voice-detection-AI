@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
-from model import CNN
+from model import RNN
 from preprocess import Config
 import random
 import os
@@ -69,6 +69,10 @@ def train(model, optimizer, train_loader, val_loader, device, n_epochs=10):
             output = model(features)
             loss = criterion(output, labels)
             loss.backward()
+            
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             
             train_loss.append(loss.item())
@@ -116,9 +120,9 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda')
     
-    model = CNN().to(device)
+    model = RNN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG.LR)
     
     best_model = train(model, optimizer, train_loader, val_loader, device, CONFIG.N_EPOCHS)

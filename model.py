@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 import random
+import torch.nn.functional as F
 import os
 import numpy as np
 from preprocess import Config
@@ -18,31 +19,32 @@ def seed_everything(seed):
 
 CONFIG = Config()
 
-class CNN(nn.Module):
-    def __init__(self, input_channels=1, output_dim=CONFIG.N_CLASSES):
-        super(CNN, self).__init__()
-        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.relu = nn.ReLU()
+class RNN(nn.Module):
+    def __init__(self, input_size=CONFIG.N_MELS, hidden_size=256, num_layers=3, output_dim=CONFIG.N_CLASSES):
+        super(RNN, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True, dropout=0.3)
+        self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, output_dim)
         self.dropout = nn.Dropout(0.5)
-
-        # Calculate the size of the flattened features
-        self.flat_features = 128 * (CONFIG.N_MELS // 8) * (CONFIG.MAX_LEN // 8)
-
-        self.fc1 = nn.Linear(self.flat_features, 256)
-        self.fc2 = nn.Linear(256, output_dim)
+        self.batch_norm = nn.BatchNorm1d(hidden_size)
 
     def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = self.pool(self.relu(self.conv3(x)))
-        x = x.view(x.size(0), -1)
-        x = self.dropout(self.relu(self.fc1(x)))
-        x = self.fc2(x)
-        x = torch.sigmoid(x)
-        return x
+        x = x.squeeze(1).permute(0, 2, 1)
+        
+        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
+        
+        out, _ = self.lstm(x, (h0, c0))
+        
+        out = self.dropout(out[:, -1, :])
+        out = F.relu(self.batch_norm(self.fc1(out)))
+        out = self.dropout(out)
+        out = self.fc2(out)
+        out = torch.sigmoid(out)
+        return out
 
 def save_model(model, path='model.pth'):
     torch.save(model.state_dict(), path)
@@ -50,5 +52,5 @@ def save_model(model, path='model.pth'):
 
 if __name__ == "__main__":
     seed_everything(CONFIG.SEED)
-    model = CNN()
+    model = RNN()
     save_model(model)

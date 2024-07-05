@@ -8,7 +8,7 @@ import librosa
 from torch.utils.data import DataLoader
 from preprocess import Config
 from train import CustomDataset
-from model import CNN
+from model import RNN
 import random
 import os
 
@@ -75,9 +75,9 @@ if __name__ == "__main__":
     test_dataset, test_ids = load_test_data('./test.csv')
     test_loader = DataLoader(test_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda')
     
-    model = CNN().to(device)
+    model = RNN().to(device)
     model.load_state_dict(torch.load('best_model.pth'))
     
     predictions = predict(model, test_loader, device)
