@@ -1,18 +1,11 @@
 # preprocess.py
 
-import librosa
-from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
-import random
-import torch
-import os
+import librosa
 from tqdm import tqdm
-import warnings
-
-warnings.filterwarnings('ignore')
-
-device = torch.device('cuda')
+import h5py
+from sklearn.model_selection import train_test_split
 
 class Config:
     SR = 32000
@@ -21,61 +14,46 @@ class Config:
     ROOT_FOLDER = './'
     N_CLASSES = 2
     BATCH_SIZE = 96
-    N_EPOCHS = 5
-    LR = 3e-4
+    N_EPOCHS = 10
+    LR = 1e-4
     SEED = 42
     MAX_LEN = 1000
 
 CONFIG = Config()
 
-def seed_everything(seed):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
+def get_mel_spectrogram(file_path):
+    y, sr = librosa.load(file_path, sr=CONFIG.SR)
+    mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=CONFIG.N_MELS, fmax=CONFIG.FMAX)
+    mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
+    
+    if mel_spectrogram_db.shape[1] > CONFIG.MAX_LEN:
+        mel_spectrogram_db = mel_spectrogram_db[:, :CONFIG.MAX_LEN]
+    else:
+        mel_spectrogram_db = np.pad(mel_spectrogram_db, ((0, 0), (0, CONFIG.MAX_LEN - mel_spectrogram_db.shape[1])), mode='constant')
+    
+    return mel_spectrogram_db
 
-seed_everything(CONFIG.SEED)
-
-df = pd.read_csv('./train.csv')
-train, val, _, _ = train_test_split(df, df['label'], test_size=0.2, random_state=CONFIG.SEED)
-
-def get_mel_spectrogram_feature(df, train_mode=True):
-    features = []
-    labels = []
-    for _, row in tqdm(df.iterrows()):
-        y, sr = librosa.load(row['path'], sr=CONFIG.SR)
+def preprocess_and_save(df, output_path):
+    with h5py.File(output_path, 'w') as h5:
+        mel_dataset = h5.create_dataset('mel', shape=(len(df), CONFIG.N_MELS, CONFIG.MAX_LEN), dtype=np.float32)
+        label_dataset = h5.create_dataset('label', shape=(len(df), CONFIG.N_CLASSES), dtype=np.float32)
         
-        mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=CONFIG.N_MELS, fmax=CONFIG.FMAX)
-        mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
-        
-        # Pad or truncate to MAX_LEN
-        if mel_spectrogram_db.shape[1] > CONFIG.MAX_LEN:
-            mel_spectrogram_db = mel_spectrogram_db[:, :CONFIG.MAX_LEN]
-        else:
-            mel_spectrogram_db = np.pad(mel_spectrogram_db, ((0, 0), (0, CONFIG.MAX_LEN - mel_spectrogram_db.shape[1])), mode='constant')
-        
-        features.append(mel_spectrogram_db)
+        for i, (_, row) in enumerate(tqdm(df.iterrows(), total=len(df))):
+            mel = get_mel_spectrogram(row['path'])
+            mel_dataset[i] = mel
+            
+            label = np.zeros(CONFIG.N_CLASSES, dtype=np.float32)
+            label[0 if row['label'] == 'fake' else 1] = 1
+            label_dataset[i] = label
 
-        if train_mode:
-            label = row['label']
-            label_vector = np.zeros(CONFIG.N_CLASSES, dtype=float)
-            label_vector[0 if label == 'fake' else 1] = 1
-            labels.append(label_vector)
-
-    if train_mode:
-        return np.array(features), np.array(labels)
-    return np.array(features)
-
-train_mel, train_labels = get_mel_spectrogram_feature(train, True)
-val_mel, val_labels = get_mel_spectrogram_feature(val, True)
-
-# Save preprocessed data
-print("Saving preprocessed data...")
-np.save('train_mel.npy', np.array(train_mel))
-np.save('val_mel.npy', np.array(val_mel))
-np.save('train_labels.npy', np.array(train_labels))
-np.save('val_labels.npy', np.array(val_labels))
-print("Preprocessed data saved successfully.")
+if __name__ == "__main__":
+    df = pd.read_csv('./train.csv')
+    train_df, val_df = train_test_split(df, test_size=0.2, random_state=CONFIG.SEED)
+    
+    print("Preprocessing training data...")
+    preprocess_and_save(train_df, 'train_data.h5')
+    
+    print("Preprocessing validation data...")
+    preprocess_and_save(val_df, 'val_data.h5')
+    
+    print("Preprocessing completed.")
