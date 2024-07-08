@@ -1,11 +1,19 @@
 # preprocess.py
 
+import librosa
+from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
-import librosa
+import random
+import torch
+import os
 from tqdm import tqdm
+import warnings
 import h5py
-from sklearn.model_selection import train_test_split
+
+warnings.filterwarnings('ignore')
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class Config:
     SR = 32000
@@ -13,16 +21,32 @@ class Config:
     FMAX = 8000
     ROOT_FOLDER = './'
     N_CLASSES = 2
-    BATCH_SIZE = 96
-    N_EPOCHS = 10
-    LR = 1e-4
+    BATCH_SIZE = 32  # Reduced batch size
+    N_EPOCHS = 5
+    LR = 3e-4
     SEED = 42
     MAX_LEN = 1000
+    CHUNK_SIZE = 1000  # Number of samples to process at once
 
 CONFIG = Config()
 
-def get_mel_spectrogram(file_path):
-    y, sr = librosa.load(file_path, sr=CONFIG.SR)
+def seed_everything(seed):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True
+
+seed_everything(CONFIG.SEED)
+
+df = pd.read_csv('./train.csv')
+train, val = train_test_split(df, test_size=0.2, random_state=CONFIG.SEED)
+
+def get_mel_spectrogram_feature(row):
+    y, sr = librosa.load(row['path'], sr=CONFIG.SR)
+    
     mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=CONFIG.N_MELS, fmax=CONFIG.FMAX)
     mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
     
@@ -33,27 +57,23 @@ def get_mel_spectrogram(file_path):
     
     return mel_spectrogram_db
 
-def preprocess_and_save(df, output_path):
-    with h5py.File(output_path, 'w') as h5:
-        mel_dataset = h5.create_dataset('mel', shape=(len(df), CONFIG.N_MELS, CONFIG.MAX_LEN), dtype=np.float32)
-        label_dataset = h5.create_dataset('label', shape=(len(df), CONFIG.N_CLASSES), dtype=np.float32)
+def process_data(df, h5_file, dataset_name, mode='w'):
+    with h5py.File(h5_file, mode) as f:
+        feature_dataset = f.create_dataset(f'{dataset_name}_mel', shape=(len(df), CONFIG.N_MELS, CONFIG.MAX_LEN),
+                                           dtype='float32', chunks=True, maxshape=(None, CONFIG.N_MELS, CONFIG.MAX_LEN))
+        label_dataset = f.create_dataset(f'{dataset_name}_labels', shape=(len(df), CONFIG.N_CLASSES),
+                                         dtype='float32', chunks=True, maxshape=(None, CONFIG.N_CLASSES))
         
         for i, (_, row) in enumerate(tqdm(df.iterrows(), total=len(df))):
-            mel = get_mel_spectrogram(row['path'])
-            mel_dataset[i] = mel
+            mel_spectrogram_db = get_mel_spectrogram_feature(row)
+            feature_dataset[i] = mel_spectrogram_db
             
-            label = np.zeros(CONFIG.N_CLASSES, dtype=np.float32)
-            label[0 if row['label'] == 'fake' else 1] = 1
-            label_dataset[i] = label
+            label = row['label']
+            label_vector = np.zeros(CONFIG.N_CLASSES, dtype=float)
+            label_vector[0 if label == 'fake' else 1] = 1
+            label_dataset[i] = label_vector
 
 if __name__ == "__main__":
-    df = pd.read_csv('./train.csv')
-    train_df, val_df = train_test_split(df, test_size=0.2, random_state=CONFIG.SEED)
-    
-    print("Preprocessing training data...")
-    preprocess_and_save(train_df, 'train_data.h5')
-    
-    print("Preprocessing validation data...")
-    preprocess_and_save(val_df, 'val_data.h5')
-    
-    print("Preprocessing completed.")
+    process_data(train, 'train_data.h5', 'train', mode='w')
+    process_data(val, 'train_data.h5', 'val', mode='a')
+    print("Preprocessed data saved successfully.")
