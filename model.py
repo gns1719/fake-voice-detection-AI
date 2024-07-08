@@ -1,56 +1,58 @@
-# model.py
-
 import torch
 import torch.nn as nn
-import random
-import torch.nn.functional as F
-import os
-import numpy as np
+import torchvision.models as models
 from preprocess import Config
-
-def seed_everything(seed):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
 
 CONFIG = Config()
 
-class RNN(nn.Module):
-    def __init__(self, input_size=CONFIG.N_MELS, hidden_size=256, num_layers=3, output_dim=CONFIG.N_CLASSES):
-        super(RNN, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
+class CNNWithAttention(nn.Module):
+    def __init__(self, num_classes=CONFIG.N_CLASSES):
+        super(CNNWithAttention, self).__init__()
         
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True, dropout=0.3)
-        self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, output_dim)
-        self.dropout = nn.Dropout(0.5)
-        self.batch_norm = nn.BatchNorm1d(hidden_size)
+        # Use a pre-trained ResNet model
+        self.resnet = models.resnet18(pretrained=True)
+        
+        # Replace the first layer to accept 3-channel input
+        self.resnet.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        
+        # Remove the last fully connected layer
+        self.resnet = nn.Sequential(*list(self.resnet.children())[:-1])
+        
+        # Add attention mechanism
+        self.attention = nn.Sequential(
+            nn.Conv2d(512, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # Add new fully connected layers
+        self.fc = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        x = x.squeeze(1).permute(0, 2, 1)
+        # ResNet features
+        features = self.resnet(x)
         
-        h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
+        # Apply attention
+        attention_weights = self.attention(features)
+        features = features * attention_weights
         
-        out, _ = self.lstm(x, (h0, c0))
+        # Global average pooling
+        features = torch.mean(features.view(features.size(0), features.size(1), -1), dim=2)
         
-        out = self.dropout(out[:, -1, :])
-        out = F.relu(self.batch_norm(self.fc1(out)))
-        out = self.dropout(out)
-        out = self.fc2(out)
-        out = torch.sigmoid(out)
-        return out
+        # Fully connected layers
+        output = self.fc(features)
+        
+        return output
 
 def save_model(model, path='model.pth'):
     torch.save(model.state_dict(), path)
     print(f"Model saved to {path}")
 
 if __name__ == "__main__":
-    seed_everything(CONFIG.SEED)
-    model = RNN()
+    model = CNNWithAttention()
     save_model(model)

@@ -1,50 +1,37 @@
-# train.py
-
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
-from model import RNN
-from preprocess import Config
+from model import CNNWithAttention
+from preprocess import Config, seed_everything
 import random
 import os
+import h5py
 
 CONFIG = Config()
 
-def seed_everything(seed):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
-
 class CustomDataset(Dataset):
-    def __init__(self, mel, label):
-        self.mel = mel
-        self.label = label
-
+    def __init__(self, h5_file, dataset_name, test_mode=False):
+        self.h5_file = h5_file
+        self.dataset_name = dataset_name
+        self.test_mode = test_mode
+        
+        with h5py.File(self.h5_file, 'r') as f:
+            self.data_len = f[dataset_name + '_mel'].shape[0]
+        
     def __len__(self):
-        return len(self.mel)
-
+        return self.data_len
+    
     def __getitem__(self, idx):
-        if self.label is not None:
-            return torch.FloatTensor(self.mel[idx]).unsqueeze(0), torch.FloatTensor(self.label[idx])
-        return torch.FloatTensor(self.mel[idx]).unsqueeze(0)
-
-def load_data():
-    train_mel = np.load('train_mel.npy')
-    train_labels = np.load('train_labels.npy')
-    val_mel = np.load('val_mel.npy')
-    val_labels = np.load('val_labels.npy')
-    
-    train_dataset = CustomDataset(train_mel, train_labels)
-    val_dataset = CustomDataset(val_mel, val_labels)
-    
-    return train_dataset, val_dataset
+        with h5py.File(self.h5_file, 'r') as f:
+            feature = torch.tensor(f[self.dataset_name + '_mel'][idx], dtype=torch.float32)
+            if not self.test_mode:
+                label = torch.tensor(f[self.dataset_name + '_labels'][idx], dtype=torch.float32)
+                return feature, label
+            else:
+                return feature
 
 def multiLabel_AUC(y_true, y_scores):
     auc_scores = []
@@ -62,15 +49,13 @@ def train(model, optimizer, train_loader, val_loader, device, n_epochs=10):
         model.train()
         train_loss = []
         for features, labels in tqdm(train_loader, desc=f"Epoch {epoch}/train"):
-            features = features.float().to(device)
-            labels = labels.float().to(device)
+            features, labels = features.to(device), labels.to(device)
             
             optimizer.zero_grad()
             output = model(features)
             loss = criterion(output, labels)
             loss.backward()
             
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
@@ -95,8 +80,7 @@ def validation(model, criterion, val_loader, device):
     
     with torch.no_grad():
         for features, labels in tqdm(val_loader, desc="Validation"):
-            features = features.float().to(device)
-            labels = labels.float().to(device)
+            features, labels = features.to(device), labels.to(device)
             
             output = model(features)
             loss = criterion(output, labels)
@@ -115,14 +99,15 @@ def validation(model, criterion, val_loader, device):
 if __name__ == "__main__":
     seed_everything(CONFIG.SEED)
     
-    train_dataset, val_dataset = load_data()
+    train_dataset = CustomDataset('train_data.h5', 'train')
+    val_dataset = CustomDataset('train_data.h5', 'val')
     
-    train_loader = DataLoader(train_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False, num_workers=4)
     
-    device = torch.device('cuda')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    model = RNN().to(device)
+    model = CNNWithAttention().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG.LR)
     
     best_model = train(model, optimizer, train_loader, val_loader, device, CONFIG.N_EPOCHS)
