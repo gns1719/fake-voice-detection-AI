@@ -15,3 +15,5 @@ unlabeled_data/
 *.csv
 
 *.npy
+
+*.h5
