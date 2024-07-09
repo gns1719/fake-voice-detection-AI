@@ -47,7 +47,7 @@ if __name__ == "__main__":
     test_dataset, test_ids = load_test_data('./test.csv')
     test_loader = DataLoader(test_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False, num_workers=0)
     
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda')
     
     model = CNNWithAttention().to(device)
     model.load_state_dict(torch.load('best_model.pth'))
