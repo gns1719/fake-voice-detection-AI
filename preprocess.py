@@ -20,11 +20,14 @@ warnings.filterwarnings('ignore')
 device = torch.device('cuda')
 
 class Config:
-    SR = 32000
-    N_MELS = 128
-    FMAX = 8000
+
+    SR = 64000
+    N_MELS = 256
+    FMAX = SR/2
+
     # Dataset
     ROOT_FOLDER = './'
+
     # Training
     N_CLASSES = 2
     BATCH_SIZE = 96
@@ -54,7 +57,7 @@ def get_mel_spectrogram_feature(df, train_mode=True):
     labels = []
     for _, row in tqdm(df.iterrows()):
         y, sr = librosa.load(row['path'], sr=CONFIG.SR)
-        
+
         mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=CONFIG.N_MELS, fmax=CONFIG.FMAX)
         mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
         mel_spectrogram_db = np.mean(mel_spectrogram_db.T, axis=0)
@@ -63,12 +66,26 @@ def get_mel_spectrogram_feature(df, train_mode=True):
         if train_mode:
             label = row['label']
             label_vector = np.zeros(CONFIG.N_CLASSES, dtype=float)
-            label_vector[0 if label == 'fake' else 1] = 1
+
+            # 'real'과 'fake' 확률 독립적 처리
+            if isinstance(label, str):
+                if 'real' in label.lower():
+                    label_vector[0] = 1.0
+                if 'fake' in label.lower():
+                    label_vector[1] = 1.0
+            elif isinstance(label, list):
+                for l in label:
+                    if 'real' in l.lower():
+                        label_vector[0] = 1.0
+                    if 'fake' in l.lower():
+                        label_vector[1] = 1.0
+
             labels.append(label_vector)
 
     if train_mode:
         return features, labels
     return features
+
 
 train_mel, train_labels = get_mel_spectrogram_feature(train, True)
 val_mel, val_labels = get_mel_spectrogram_feature(val, True)
