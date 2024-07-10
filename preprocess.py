@@ -1,20 +1,17 @@
 # preprocess.py
 
+import os
+import random
+import warnings
+
 import librosa
-from sklearn.model_selection import train_test_split
 import numpy as np
 import pandas as pd
-import random
-
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+import torch
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset
 from tqdm import tqdm
 
-import torch
-import os
-
-import warnings
 warnings.filterwarnings('ignore')
 
 device = torch.device('cuda')
