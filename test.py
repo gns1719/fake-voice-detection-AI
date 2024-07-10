@@ -1,59 +1,54 @@
+# test.py
+
 import torch
+from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
-import librosa
-from torch.utils.data import DataLoader
-from preprocess import Config, seed_everything, get_mel_spectrogram_feature
-from train import CustomDataset
-from model import CNNWithAttention
-import h5py
+from preprocess import Config
+from model import get_model
 
-CONFIG = Config()
+class TestDataset(Dataset):
+    def __init__(self, df, data_dir):
+        self.df = df
+        self.data_dir = data_dir
 
-def load_test_data(test_csv_path):
-    test_df = pd.read_csv(test_csv_path)
-    
-    with h5py.File('test_data.h5', 'w') as f:
-        feature_dataset = f.create_dataset('test_mel', shape=(len(test_df), CONFIG.INPUT_CHANNELS, CONFIG.N_MELS, CONFIG.MAX_LEN),
-                                           dtype='uint8', chunks=True)
-        
-        for i, (_, row) in enumerate(tqdm(test_df.iterrows(), total=len(test_df))):
-            rgb_spectrogram = get_mel_spectrogram_feature(row)
-            feature_dataset[i] = rgb_spectrogram
-    
-    test_dataset = CustomDataset('test_data.h5', 'test', test_mode=True)
-    return test_dataset, test_df['id'].tolist()
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        melspec = np.load(f"{self.data_dir}/{row['id']}.npy")
+        return torch.FloatTensor(melspec), row['id']
 
 def predict(model, test_loader, device):
     model.eval()
     predictions = []
-    
+    ids = []
     with torch.no_grad():
-        for features in test_loader:
-            features = features.float().to(device)
-            output = model(features)
-            predictions.append(output.cpu().numpy())
-    
-    predictions = np.concatenate(predictions)
-    return predictions
+        for data, file_id in test_loader:
+            data = data.to(device)
+            output = model(data)
+            probs = torch.softmax(output, dim=1)
+            predictions.extend(probs.cpu().numpy())
+            ids.extend(file_id)
+    return ids, predictions
 
 if __name__ == "__main__":
-    seed_everything(CONFIG.SEED)
-    
-    test_dataset, test_ids = load_test_data('./test.csv')
-    test_loader = DataLoader(test_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False, num_workers=4)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    model = CNNWithAttention().to(device)
-    model.load_state_dict(torch.load('best_model.pth'))
-    
-    predictions = predict(model, test_loader, device)
-    
-    submission = pd.DataFrame(predictions, columns=['fake', 'real'])
-    submission['id'] = test_ids
-    submission = submission[['id', 'fake', 'real']]  # Rearrange columns to ['id', 'fake', 'real']
-    
-    submission.to_csv('submission.csv', index=False)
-    print("Predictions saved to submission.csv.")
+    test_df = pd.read_csv("test.csv")
+    test_dataset = TestDataset(test_df, "processed_test")
+    test_loader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = get_model(use_attention=True).to(device)
+    model.load_state_dict(torch.load("deep_fake_voice_model.pth"))
+
+    ids, predictions = predict(model, test_loader, device)
+
+    submission = pd.DataFrame({
+        "id": ids,
+        "fake": [pred[0] for pred in predictions],
+        "real": [pred[1] for pred in predictions]
+    })
+
+    submission.to_csv("sample_submission.csv", index=False)
+    print("Predictions saved to sample_submission.csv")

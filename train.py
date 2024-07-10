@@ -1,116 +1,135 @@
+# train.py
+
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from preprocess import Config
+from model import get_model
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score
-from model import CNNWithAttention
-from preprocess import Config, seed_everything
-import random
 import os
-import h5py
 
-CONFIG = Config()
+class AudioDataset(Dataset):
+    def __init__(self, df, data_dir):
+        self.df = df
+        self.data_dir = data_dir
 
-class CustomDataset(Dataset):
-    def __init__(self, h5_file, dataset_name, test_mode=False):
-        self.h5_file = h5_file
-        self.dataset_name = dataset_name
-        self.test_mode = test_mode
-        
-        with h5py.File(self.h5_file, 'r') as f:
-            self.data_len = f[dataset_name + '_mel'].shape[0]
-        
     def __len__(self):
-        return self.data_len
-    
+        return len(self.df)
+
     def __getitem__(self, idx):
-        with h5py.File(self.h5_file, 'r') as f:
-            feature = torch.tensor(f[self.dataset_name + '_mel'][idx], dtype=torch.float32)
-            if not self.test_mode:
-                label = torch.tensor(f[self.dataset_name + '_labels'][idx], dtype=torch.float32)
-                return feature, label
-            else:
-                return feature
+        row = self.df.iloc[idx]
+        melspec = np.load(f"{self.data_dir}/{row['id']}.npy")
+        label = 1 if row['label'] == 'real' else 0
+        return torch.FloatTensor(melspec), torch.LongTensor([label])
 
-def multiLabel_AUC(y_true, y_scores):
-    auc_scores = []
-    for i in range(y_true.shape[1]):
-        auc = roc_auc_score(y_true[:, i], y_scores[:, i])
-        auc_scores.append(auc)
-    return np.mean(auc_scores)
+def check_data_files(df, data_dir):
+    missing_files = []
+    for _, row in df.iterrows():
+        file_path = os.path.join(data_dir, f"{row['id']}.npy")
+        if not os.path.exists(file_path):
+            missing_files.append(file_path)
+    return missing_files
 
-def train(model, optimizer, train_loader, val_loader, device, n_epochs=10):
-    criterion = nn.BCELoss().to(device)
-    best_val_score = 0
-    best_model = None
-    
-    for epoch in range(1, n_epochs+1):
+def train(model, train_loader, val_loader, criterion, optimizer, num_epochs, device):
+    for epoch in range(num_epochs):
         model.train()
-        train_loss = []
-        for features, labels in tqdm(train_loader, desc=f"Epoch {epoch}/train"):
-            features, labels = features.to(device), labels.to(device)
-            
+        train_loss = 0
+        correct = 0
+        total = 0
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        for batch_idx, (data, target) in enumerate(progress_bar):
+            data, target = data.to(device), target.to(device)
             optimizer.zero_grad()
-            output = model(features)
-            loss = criterion(output, labels)
+            output = model(data)
+            loss = criterion(output, target.squeeze())
             loss.backward()
-            
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
+            train_loss += loss.item()
             
-            train_loss.append(loss.item())
-        
-        val_loss, val_score = validation(model, criterion, val_loader, device)
-        
-        if val_score > best_val_score:
-            best_val_score = val_score
-            best_model = model.state_dict()
-        
-        print(f"Epoch {epoch}: Train Loss: {np.mean(train_loss):.4f}, Val Loss: {val_loss:.4f}, Val AUC: {val_score:.4f}")
+            _, predicted = output.max(1)
+            total += target.size(0)
+            correct += predicted.eq(target.squeeze()).sum().item()
+            
+            progress_bar.set_postfix({
+                'train_loss': f"{train_loss/(batch_idx+1):.4f}",
+                'train_acc': f"{100.*correct/total:.2f}%"
+            })
 
-    return best_model
+        model.eval()
+        val_loss = 0
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for data, target in tqdm(val_loader, desc="Validation"):
+                data, target = data.to(device), target.to(device)
+                output = model(data)
+                val_loss += criterion(output, target.squeeze()).item()
+                _, predicted = output.max(1)
+                total += target.size(0)
+                correct += predicted.eq(target.squeeze()).sum().item()
 
-def validation(model, criterion, val_loader, device):
-    model.eval()
-    val_loss = []
-    val_true = []
-    val_pred = []
-    
-    with torch.no_grad():
-        for features, labels in tqdm(val_loader, desc="Validation"):
-            features, labels = features.to(device), labels.to(device)
-            
-            output = model(features)
-            loss = criterion(output, labels)
-            val_loss.append(loss.item())
-            
-            val_true.append(labels.cpu().numpy())
-            val_pred.append(output.cpu().numpy())
-    
-    val_true = np.concatenate(val_true)
-    val_pred = np.concatenate(val_pred)
-    
-    val_score = multiLabel_AUC(val_true, val_pred)
-    
-    return np.mean(val_loss), val_score
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print(f"Train Loss: {train_loss/len(train_loader):.4f}")
+        print(f"Train Accuracy: {100.*correct/total:.2f}%")
+        print(f"Val Loss: {val_loss/len(val_loader):.4f}")
+        print(f"Val Accuracy: {100.*correct/total:.2f}%")
 
 if __name__ == "__main__":
-    seed_everything(CONFIG.SEED)
-    
-    train_dataset = CustomDataset('train_data.h5', 'train')
-    val_dataset = CustomDataset('train_data.h5', 'val')
-    
-    train_loader = DataLoader(train_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=CONFIG.BATCH_SIZE, shuffle=False, num_workers=4)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    model = CNNWithAttention().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG.LR)
-    
-    best_model = train(model, optimizer, train_loader, val_loader, device, CONFIG.N_EPOCHS)
-    
-    torch.save(best_model, 'best_model.pth')
-    print("Training completed and best model saved.")
+    try:
+        print("Starting script execution")
+        
+        print("Loading and splitting data")
+        df = pd.read_csv("train.csv")
+        train_df, val_df = train_test_split(df, test_size=0.2, random_state=Config.SEED)
+        
+        print("Checking for missing data files")
+        missing_train = check_data_files(train_df, "processed_train")
+        missing_val = check_data_files(val_df, "processed_train")
+        
+        if missing_train or missing_val:
+            print(f"Missing train files: {len(missing_train)}")
+            print(f"Missing validation files: {len(missing_val)}")
+            raise FileNotFoundError("Some preprocessed data files are missing.")
+        
+        print("Creating datasets")
+        train_dataset = AudioDataset(train_df, "processed_train")
+        val_dataset = AudioDataset(val_df, "processed_train")
+        
+        print(f"Train dataset size: {len(train_dataset)}")
+        print(f"Validation dataset size: {len(val_dataset)}")
+        
+        print("Creating data loaders")
+        train_loader = DataLoader(train_dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=Config.BATCH_SIZE, shuffle=False)
+        
+        print("Checking CUDA availability")
+        device = torch.device("cuda")
+        print(f"Using device: {device}")
+        
+        if torch.cuda.is_available():
+            print(f"GPU memory allocated: {torch.cuda.memory_allocated()}")
+            print(f"GPU memory cached: {torch.cuda.memory_cached()}")
+        
+        print("Creating model")
+        model = get_model(use_attention=True).to(device)
+        print(model)
+        
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=Config.LR)
+        
+        print("Starting training")
+        train(model, train_loader, val_loader, criterion, optimizer, num_epochs=Config.N_EPOCHS, device=device)
+        
+        print("Saving model")
+        torch.save(model.state_dict(), "deep_fake_voice_model.pth")
+        
+        print("Training completed successfully")
+        
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        import traceback
+        traceback.print_exc()
